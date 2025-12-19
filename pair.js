@@ -1,249 +1,467 @@
-const express = require('express');
-const { createSocket } = require('socket.io');
-const http = require('http');
-const path = require('path');
-const fs = require('fs');
-const { 
-    default: makeWASocket, 
-    useMultiFileAuthState, 
-    DisconnectReason,
-    Browsers 
-} = require('@whiskeysockets/baileys');
-
-const app = express();
-const server = http.createServer(app);
-const io = createSocket(server);
-
-app.use(express.static(__dirname));
-app.use(express.json());
-
-// Store active sessions
-const activeSessions = new Map();
-
-// Serve main page
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-// Socket.io connection
-io.on('connection', (socket) => {
-    console.log('New client connected:', socket.id);
-
-    socket.on('start-pairing', async (data) => {
-        const { phoneNumber } = data;
-        const sessionId = `session_${Date.now()}_${socket.id}`;
-        
-        console.log(`Starting pairing for: ${phoneNumber}`);
-        
-        try {
-            // Generate pairing code
-            const pairingResult = await startWhatsAppPairing(phoneNumber, sessionId, socket);
-            
-            if (pairingResult.success) {
-                socket.emit('qr-generated', {
-                    sessionId,
-                    qr: pairingResult.qr
-                });
-            } else {
-                socket.emit('pairing-error', { error: pairingResult.error });
-            }
-        } catch (error) {
-            console.error('Pairing error:', error);
-            socket.emit('pairing-error', { error: error.message });
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Session Generator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-    });
 
-    socket.on('cancel-pairing', (data) => {
-        const { sessionId } = data;
-        endSession(sessionId);
-        socket.emit('pairing-update', { message: 'Pairing cancelled' });
-    });
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
 
-    socket.on('disconnect', () => {
-        console.log('Client disconnected:', socket.id);
-        // Clean up sessions for this socket
-        for (const [sessionId, session] of activeSessions.entries()) {
-            if (session.socketId === socket.id) {
-                endSession(sessionId);
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            width: 100%;
+            max-width: 500px;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        input[type="tel"] {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="tel"]:focus {
+            outline: none;
+            border-color: #25D366;
+        }
+
+        .input-note {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(37, 211, 102, 0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status-container {
+            display: none;
+            margin-top: 30px;
+            text-align: center;
+        }
+
+        .status-box {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .status-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+
+        .pairing-code {
+            background: #25D366;
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            font-size: 32px;
+            font-weight: bold;
+            letter-spacing: 2px;
+            margin: 20px 0;
+        }
+
+        .instructions {
+            background: #e8f5e9;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+
+        .instructions ol {
+            text-align: left;
+            margin-left: 20px;
+            margin-top: 10px;
+        }
+
+        .instructions li {
+            margin-bottom: 8px;
+        }
+
+        .qr-container {
+            margin: 20px 0;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        #qrCode {
+            max-width: 200px;
+            margin: 0 auto;
+            display: block;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .timer {
+            font-size: 14px;
+            color: #666;
+            margin-top: 10px;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #25D366;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                border-radius: 15px;
+            }
+            
+            .header {
+                padding: 20px;
+            }
+            
+            .content {
+                padding: 20px;
+            }
+            
+            .pairing-code {
+                font-size: 24px;
+                padding: 15px;
             }
         }
-    });
-});
-
-async function startWhatsAppPairing(phoneNumber, sessionId, socket) {
-    const sessionDir = `./sessions/${sessionId}`;
-    
-    // Create session directory
-    if (!fs.existsSync('./sessions')) {
-        fs.mkdirSync('./sessions');
-    }
-    if (!fs.existsSync(sessionDir)) {
-        fs.mkdirSync(sessionDir, { recursive: true });
-    }
-
-    try {
-        // Initialize auth state
-        const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📱 WhatsApp Session Generator</h1>
+            <p>Generate a secure session for your WhatsApp account</p>
+        </div>
         
-        // Create WhatsApp socket
-        const sock = makeWASocket({
-            auth: state,
-            printQRInTerminal: false,
-            browser: Browsers.ubuntu('Chrome'),
-            syncFullHistory: false,
-            markOnlineOnConnect: false,
-            generateHighQualityLinkPreview: true,
-        });
-
-        // Store session
-        activeSessions.set(sessionId, {
-            socketId: socket.id,
-            sock,
-            saveCreds,
-            phoneNumber,
-            sessionDir
-        });
-
-        // Handle connection updates
-        sock.ev.on('connection.update', (update) => {
-            const { connection, lastDisconnect, qr } = update;
+        <div class="content">
+            <div id="formSection">
+                <div class="form-group">
+                    <label for="phoneNumber">WhatsApp Phone Number</label>
+                    <input 
+                        type="tel" 
+                        id="phoneNumber" 
+                        placeholder="+1234567890"
+                        required
+                    >
+                    <div class="input-note">
+                        Include country code (e.g., +1 for US, +44 for UK, +234 for Nigeria)
+                    </div>
+                </div>
+                
+                <button id="startBtn" class="btn">Generate Pairing Code</button>
+                
+                <div class="alert" id="errorAlert"></div>
+            </div>
             
-            if (qr) {
-                console.log(`QR generated for ${phoneNumber}`);
-                // QR is already handled by the QR generation event
+            <div id="statusSection" class="status-container">
+                <div class="status-box">
+                    <div class="spinner" id="statusSpinner"></div>
+                    <div id="statusMessage">Initializing session...</div>
+                    <div class="timer" id="timer">Session expires in: 30:00</div>
+                </div>
+                
+                <div id="pairingCodeContainer" style="display: none;">
+                    <div class="pairing-code" id="pairingCode">---- ----</div>
+                    <div class="instructions">
+                        <p><strong>Instructions:</strong></p>
+                        <ol>
+                            <li>Open WhatsApp on your phone</li>
+                            <li>Go to Settings → Linked Devices → Link a Device</li>
+                            <li>Enter the pairing code above</li>
+                            <li>Wait for connection confirmation</li>
+                        </ol>
+                    </div>
+                </div>
+                
+                <div id="qrContainer" class="qr-container" style="display: none;">
+                    <img id="qrCode" src="" alt="QR Code">
+                    <p style="margin-top: 10px; font-size: 14px;">Scan QR code as alternative method</p>
+                </div>
+                
+                <div class="alert" id="successAlert"></div>
+                
+                <button id="newSessionBtn" class="btn" style="display: none; margin-top: 20px;">
+                    Start New Session
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        let socket = null;
+        let sessionId = null;
+        let timerInterval = null;
+        let timeLeft = 30 * 60; // 30 minutes in seconds
+
+        document.getElementById('startBtn').addEventListener('click', startSession);
+        document.getElementById('newSessionBtn').addEventListener('click', resetForm);
+
+        function startSession() {
+            const phoneNumber = document.getElementById('phoneNumber').value.trim();
+            
+            if (!phoneNumber.match(/^\+[1-9]\d{1,14}$/)) {
+                showError('Please enter a valid phone number with country code (e.g., +1234567890)');
+                return;
             }
 
-            if (connection === 'open') {
-                console.log(`Connected successfully: ${phoneNumber}`);
-                
-                // Get credentials
-                const creds = sock.authState.creds;
-                
-                // Save credentials to file
-                const credsFilePath = `${sessionDir}/creds.json`;
-                fs.writeFileSync(credsFilePath, JSON.stringify(creds, null, 2));
-                
-                // Send credentials to client
-                socket.emit('pairing-success', {
-                    sessionId,
-                    creds,
-                    message: 'WhatsApp paired successfully!'
-                });
-                
-                // Clean up session
-                setTimeout(() => {
-                    endSession(sessionId);
-                }, 5000);
-            }
+            // Disable button and show loading
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('startBtn').textContent = 'Processing...';
 
-            if (connection === 'close') {
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log(`Connection closed for ${phoneNumber}, reconnect: ${shouldReconnect}`);
-                
-                if (!shouldReconnect) {
-                    socket.emit('pairing-error', { 
-                        error: 'Connection closed. Please try again.' 
-                    });
-                    endSession(sessionId);
+            // Connect to Socket.io
+            socket = io();
+
+            // Send request to start session
+            fetch('/api/start-session', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ phoneNumber })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showError(data.error);
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('startBtn').textContent = 'Generate Pairing Code';
+                    return;
                 }
-            }
-        });
 
-        // Save credentials periodically
-        sock.ev.on('creds.update', saveCreds);
-
-        // Generate QR
-        return new Promise((resolve) => {
-            sock.ev.once('connection.update', async (update) => {
-                if (update.qr) {
-                    resolve({
-                        success: true,
-                        qr: update.qr
-                    });
-                }
+                sessionId = data.sessionId;
+                
+                // Switch to status view
+                document.getElementById('formSection').style.display = 'none';
+                document.getElementById('statusSection').style.display = 'block';
+                
+                // Start timer
+                startTimer();
+                
+                // Start pairing process
+                socket.emit('startPairing', { sessionId, phoneNumber });
+            })
+            .catch(error => {
+                showError('Failed to start session. Please try again.');
+                console.error('Error:', error);
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('startBtn').textContent = 'Generate Pairing Code';
             });
+
+            // Socket event handlers
+            socket.on('status', (data) => {
+                updateStatus(data.message);
+            });
+
+            socket.on('pairingCode', (data) => {
+                document.getElementById('pairingCode').textContent = data.code;
+                document.getElementById('pairingCodeContainer').style.display = 'block';
+                updateStatus(`Pairing code generated: ${data.code}`);
+            });
+
+            socket.on('qrCode', (data) => {
+                document.getElementById('qrCode').src = data.qrCode;
+                document.getElementById('qrContainer').style.display = 'block';
+            });
+
+            socket.on('connected', (data) => {
+                showSuccess('✅ WhatsApp successfully connected! Your credentials will be sent to your phone shortly.');
+                document.getElementById('statusSpinner').style.display = 'none';
+                document.getElementById('pairingCodeContainer').style.display = 'none';
+                document.getElementById('qrContainer').style.display = 'none';
+                document.getElementById('newSessionBtn').style.display = 'block';
+                clearInterval(timerInterval);
+            });
+
+            socket.on('error', (data) => {
+                showError(data.message);
+            });
+
+            socket.on('sessionExpired', () => {
+                showError('Session expired. Please start a new session.');
+                resetForm();
+            });
+
+            socket.on('disconnect', () => {
+                showError('Connection lost. Trying to reconnect...');
+            });
+        }
+
+        function updateStatus(message) {
+            document.getElementById('statusMessage').textContent = message;
+        }
+
+        function startTimer() {
+            const timerElement = document.getElementById('timer');
             
-            // Timeout after 30 seconds if no QR
+            timerInterval = setInterval(() => {
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    showError('Session expired. Please start a new session.');
+                    resetForm();
+                    return;
+                }
+                
+                timeLeft--;
+                const minutes = Math.floor(timeLeft / 60);
+                const seconds = timeLeft % 60;
+                timerElement.textContent = `Session expires in: ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+
+        function showError(message) {
+            const alert = document.getElementById('errorAlert');
+            alert.textContent = message;
+            alert.className = 'alert alert-error';
+            alert.style.display = 'block';
             setTimeout(() => {
-                resolve({
-                    success: false,
-                    error: 'QR generation timeout'
-                });
-            }, 30000);
-        });
+                alert.style.display = 'none';
+            }, 5000);
+        }
 
-    } catch (error) {
-        console.error('Error in pairing:', error);
-        return {
-            success: false,
-            error: error.message
-        };
-    }
-}
+        function showSuccess(message) {
+            const alert = document.getElementById('successAlert');
+            alert.textContent = message;
+            alert.className = 'alert alert-success';
+            alert.style.display = 'block';
+        }
 
-function endSession(sessionId) {
-    const session = activeSessions.get(sessionId);
-    if (session) {
-        try {
-            // Close socket connection
-            if (session.sock) {
-                session.sock.end();
+        function resetForm() {
+            if (socket) {
+                socket.disconnect();
             }
             
-            // Delete session directory after 1 minute (to allow download)
-            setTimeout(() => {
-                try {
-                    const fs = require('fs');
-                    const path = require('path');
-                    const sessionDir = `./sessions/${sessionId}`;
-                    if (fs.existsSync(sessionDir)) {
-                        fs.rmSync(sessionDir, { recursive: true, force: true });
-                        console.log(`Cleaned up session: ${sessionId}`);
-                    }
-                } catch (cleanupError) {
-                    console.error('Cleanup error:', cleanupError);
-                }
-            }, 60000);
+            if (sessionId) {
+                fetch(`/api/cleanup/${sessionId}`, { method: 'DELETE' });
+            }
             
-        } catch (error) {
-            console.error('Error ending session:', error);
+            document.getElementById('formSection').style.display = 'block';
+            document.getElementById('statusSection').style.display = 'none';
+            document.getElementById('phoneNumber').value = '';
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('startBtn').textContent = 'Generate Pairing Code';
+            document.getElementById('newSessionBtn').style.display = 'none';
+            document.getElementById('successAlert').style.display = 'none';
+            document.getElementById('pairingCodeContainer').style.display = 'none';
+            document.getElementById('qrContainer').style.display = 'none';
+            document.getElementById('statusSpinner').style.display = 'block';
+            
+            if (timerInterval) {
+                clearInterval(timerInterval);
+            }
+            
+            timeLeft = 30 * 60;
+            sessionId = null;
         }
-        
-        activeSessions.delete(sessionId);
-        console.log(`Ended session: ${sessionId}`);
-    }
-}
 
-// API endpoint to download credentials
-app.get('/download-creds/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const sessionDir = `./sessions/${sessionId}`;
-    const credsFilePath = `${sessionDir}/creds.json`;
-    
-    if (fs.existsSync(credsFilePath)) {
-        res.download(credsFilePath, `whatsapp-creds-${sessionId}.json`);
-    } else {
-        res.status(404).json({ error: 'Credentials not found' });
-    }
-});
-
-// Health check endpoint for Render/Heroku
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Visit http://localhost:${PORT} to start pairing`);
-});
-
-// Handle process termination
-process.on('SIGINT', () => {
-    console.log('Shutting down server...');
-    // Clean up all sessions
-    for (const sessionId of activeSessions.keys()) {
-        endSession(sessionId);
-    }
-    process.exit(0);
-});
+        // Auto-cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (sessionId) {
+                fetch(`/api/cleanup/${sessionId}`, { method: 'DELETE' });
+            }
+        });
+    </script>
+</body>
+</html>
