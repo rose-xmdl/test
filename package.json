@@ -1,0 +1,17 @@
+{
+  "name": "whatsapp-pair-website",
+  "version": "1.0.0",
+  "description": "WhatsApp Pairing Website with Baileys",
+  "main": "pair.js",
+  "scripts": {
+    "start": "node pair.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc.9",
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "qrcode-terminal": "^0.12.0",
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7"
+  }
+}
